@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"github.com/adriengou/go-redis/src/client"
 	"log"
 	"log/slog"
 	"net"
+	"time"
 )
 
 const defaultListenAddress = ":3333"
@@ -16,9 +20,13 @@ type Server struct {
 	Config
 	ln net.Listener
 
-	peers     map[*Peer]bool
+	peers map[*Peer]bool
+
 	addPeerCh chan *Peer
 	quitCh    chan struct{}
+	msgCh     chan []byte
+
+	kv *KV
 }
 
 func NewServer(cfg Config) *Server {
@@ -32,6 +40,8 @@ func NewServer(cfg Config) *Server {
 		peers:     make(map[*Peer]bool),
 		addPeerCh: make(chan *Peer),
 		quitCh:    make(chan struct{}),
+		msgCh:     make(chan []byte),
+		kv:        NewKV(),
 	}
 }
 
@@ -54,8 +64,16 @@ func (s *Server) loop() {
 		select {
 		case <-s.quitCh:
 			return
+
 		case peer := <-s.addPeerCh:
 			s.peers[peer] = true
+
+		case msgBuf := <-s.msgCh:
+			//fmt.Println(string(msgBuf))
+			err := s.handleRawMessage(msgBuf)
+			if err != nil {
+				slog.Error("raw message error", "err", err)
+			}
 		}
 	}
 }
@@ -72,7 +90,7 @@ func (s *Server) acceptLoop() error {
 }
 
 func (s *Server) handleConn(conn net.Conn) {
-	peer := NewPeer(conn)
+	peer := NewPeer(conn, s.msgCh)
 	s.addPeerCh <- peer
 	slog.Info("new peer connected", "remoteAddr", conn.RemoteAddr())
 	if err := peer.readLoop(); err != nil {
@@ -80,7 +98,40 @@ func (s *Server) handleConn(conn net.Conn) {
 	}
 }
 
+func (s *Server) handleRawMessage(msgBuf []byte) error {
+	cmd, err := parseCommand(string(msgBuf))
+	if err != nil {
+		return err
+	}
+
+	switch v := cmd.(type) {
+	case SetCommand:
+		fmt.Println("wants to set a key in to hash table", "key", v.key, "val", v.val)
+		return s.kv.Set(v.key, v.val)
+	}
+	return nil
+}
+
 func main() {
+
 	server := NewServer(Config{})
-	log.Fatal(server.Start())
+	go func() {
+		log.Fatal(server.Start())
+	}()
+
+	time.Sleep(time.Second)
+
+	for i := 0; i < 10; i++ {
+
+		c := client.NewClient("localhost:3333")
+		err := c.Set(context.TODO(), fmt.Sprint("foo_", i), fmt.Sprint("bar_", i))
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	time.Sleep(time.Second)
+	fmt.Println(server.kv.data)
+
+	select {} // blocking so the program don't stop
 }
