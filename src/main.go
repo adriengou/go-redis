@@ -1,7 +1,84 @@
 package main
 
-import "fmt"
+import (
+	"log"
+	"log/slog"
+	"net"
+)
+
+const defaultListenAddress = ":3333"
+
+type Config struct {
+	ListenAddress string
+}
+
+type Server struct {
+	Config
+	ln net.Listener
+
+	peers     map[*Peer]bool
+	addPeerCh chan *Peer
+	quitCh    chan struct{}
+}
+
+func NewServer(cfg Config) *Server {
+
+	if len(cfg.ListenAddress) == 0 {
+		cfg.ListenAddress = defaultListenAddress
+	}
+
+	return &Server{
+		Config:    cfg,
+		peers:     make(map[*Peer]bool),
+		addPeerCh: make(chan *Peer),
+		quitCh:    make(chan struct{}),
+	}
+}
+
+func (s *Server) Start() error {
+	ln, err := net.Listen("tcp", s.ListenAddress)
+	if err != nil {
+		return err
+	}
+
+	s.ln = ln
+	go s.loop()
+
+	slog.Info("server running", "listenAddress", s.ListenAddress)
+
+	return s.acceptLoop()
+}
+
+func (s *Server) loop() {
+	for {
+		select {
+		case <-s.quitCh:
+			return
+		case peer := <-s.addPeerCh:
+			s.peers[peer] = true
+		}
+	}
+}
+
+func (s *Server) acceptLoop() error {
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			slog.Error("accept error", "err", err)
+			continue
+		}
+		go s.handleConn(conn)
+	}
+}
+
+func (s *Server) handleConn(conn net.Conn) {
+	peer := NewPeer(conn)
+	s.addPeerCh <- peer
+	slog.Info("new peer connected", "remoteAddr", conn.RemoteAddr())
+	peer.readLoop()
+}
 
 func main() {
-	fmt.Println("Hello world")
+	server := NewServer(Config{})
+	log.Fatal(server.Start())
 }
